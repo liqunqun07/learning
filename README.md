@@ -9,4 +9,4 @@ Reference：
 https://blog.csdn.net/what_how_why2020/article/details/122889758
 https://blog.csdn.net/what_how_why2020/article/details/121431468
 
-Data:poliblogs2008.csv
+Data:poliblogs2008.csv,you can get from:https://www.jstatsoft.org/article/view/v091i02
