@@ -1,0 +1,420 @@
+---
+title: "STM主题模型"
+author: "kikili"
+date: "2025-07-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r}
+#setwd("/Users/liqin/Desktop/R文档/学习STM")
+data <- read.csv("poliblogs2008.csv",header = TRUE)
+```
+
+```{r}
+#参考 https://blog.csdn.net/what_how_why2020/article/details/122889758
+View(data) #13000+数据
+
+```
+
+```{r}
+library(stm)
+# 调用textProcessor算法，将 data$document、data 作为参数
+processed <- textProcessor(documents = data$documents, metadata = data, wordLengths = c(1, Inf))
+#textProcessor()函数中的参数wordLengths = c(3, Inf)表示：短于最小字长（默认为3字符）或长于最大字长（默认为inf）的字数将被丢弃，[用户@qq_39172034]建议设置该参数为wordLengths = c(1, Inf)，以避免避免单个汉字被删除
+
+```
+```{r}
+processed 
+```
+
+```{r}
+#数据预处理：转换数据格式，根据阈值删除低频单词等，用到的是prepDocuments()和plotRemoved()两个函数
+#plotRemoved()函数可绘制不同阈值下删除的document、words、token数量,根据此pdf文件的结果（output/stm-plot-removed.pdf），确定prepDocuments()中的参数lower.thresh的取值，以此确定变量docs、vocab、meta，最终确定为15
+
+pdf("stm-plot-removed.pdf")
+plotRemoved(processed$documents, lower.thresh = seq(1, 200, by = 100))
+dev.off()
+```
+```{r}
+# 去除词频低于15的词汇
+out <- prepDocuments(documents = processed$documents, vocab = processed$vocab, meta = processed$meta, lower.thresh = 15)
+
+docs <- out$documents
+vocab <- out$vocab
+meta <- out$meta
+
+```
+这里生成的三个东西：
+docs：documents。包含单词索引及其相关计数的文档列表
+vocab：a vocab character vector。包含与单词索引关联的单词
+meta：a metadata matrix。包含文档协变量
+
+```{r}
+
+```
+在 STM（Structural Topic Model） 中，元数据（metadata） 是指与文本相关联的额外结构化信息，它可以是文本的作者、发布时间、分类标签、情感评分等任何可能影响文本主题生成或表达的外部变量。STM 的关键创新正是通过将元数据纳入建模过程，从而更灵活地分析主题如何与这些外部因素关联。
+协变量其实是可能影响主题分布的那些变量，这里设置为：
+rating 是分类变量，rating（意识形态，Liberal，Conservative）作为主题流行度的协变量。
+s(day) 是平滑函数：
+s(day) 表示“发帖日期（day）”对主题流行度（prevalence）的影响可能是非线性的（如某些主题在特定时间段爆发）。模型会自动估计 day 的平滑曲线，无需手动分段或假设线性。
+```{r}
+#一个完整的调用的例子
+poliblogPrevFit <- stm(documents = out$documents, vocab = out$vocab, K = 20, prevalence = ~rating + s(day), max.em.its = 75, data = out$meta, init.type = "Spectral")
+#out为前面清洗后的数据
+#EM 算法的最大迭代次数（默认 500，这里设为 75 以加速收敛）
+#init.type	初始化方法："Spectral"（基于谱分解的快速初始化，适合大文本），其他选项："LDA"（类似 LDA 的随机初始化）
+```
+```{r}
+summary(poliblogPrevFit)
+```
+
+
+【遵循以下步骤】
+在正式的环节中，有两个不确定的变量：
+主题数量（K）和初始化的影响
+因此需要：
+1、确定主题数量
+2、select一个初始化(数据量大可以跳过这个步骤)
+主题数已知时：
+若数据量大，直接使用 stm(init.type="Spectral")。
+若需稳健性，用 selectModel() 多轮筛选。
+```{r}
+# 步骤1：确定主题数 K
+#以下是 手动计算不同主题数（K）的评估指标 并选择最佳模型的完整代码，包含 对数似然（log-likelihood）、语义一致性（semantic coherence）、主题区分度（exclusivity） 等指标
+#评估指标：对数似然（log_likelihood）语义一致性（semantic_coherence）主题区分度（exclusivity）残差（residuals）
+library(stm)
+library(ggplot2)
+library(gridExtra)  # 用于多图排列
+
+# 定义要测试的主题数范围
+K_values <- 5:30 # 5,10,15,20,25,30
+
+# 初始化结果存储表格
+results <- data.frame(
+  K = integer(),
+  log_likelihood = numeric(),
+  semantic_coherence = numeric(),
+  exclusivity = numeric(),
+  residuals = numeric()
+)
+
+# 循环遍历每个K值
+for (K in K_values) {
+  # 拟合STM模型
+  model <- stm(
+    documents = out$documents,
+    vocab = out$vocab,
+    K = K,
+    prevalence = ~rating + s(day),
+    max.em.its = 75,
+    data = out$meta,
+    init.type = "Spectral"
+  )
+  
+  # 计算指标
+  ## 对数似然（越高越好）
+  ll <- max(model$convergence$bound)
+  
+  ## 语义一致性（越高越好）
+  semcoh <- mean(semanticCoherence(model, out$documents))
+  
+  ## 主题区分度（exclusivity，越高越好）
+  exclus <- mean(exclusivity(model))
+  
+  ## 残差（越低越好）
+  res <- checkResiduals(model, out$documents)$dispersion
+  
+  # 记录结果
+  results <- rbind(results, data.frame(
+    K = K,
+    log_likelihood = ll,
+    semantic_coherence = semcoh,
+    exclusivity = exclus,
+    residuals = res
+  ))
+  
+  cat("Completed K =", K, "\n")
+}
+
+# 标准化指标（仅用于绘图，不用于综合评分）
+results$scaled_ll <- scale(results$log_likelihood)
+results$scaled_semcoh <- scale(results$semantic_coherence)
+results$scaled_exclus <- scale(results$exclusivity)
+results$scaled_res <- scale(-results$residuals)  # 残差越低越好，取负值
+
+# 创建各指标的趋势图
+p1 <- ggplot(results, aes(x = K, y = log_likelihood)) +
+  geom_line() + geom_point() +
+  labs(title = "Log-Likelihood by K", y = "Log-Likelihood")
+
+p2 <- ggplot(results, aes(x = K, y = semantic_coherence)) +
+  geom_line() + geom_point() +
+  labs(title = "Semantic Coherence by K", y = "Semantic Coherence")
+
+p3 <- ggplot(results, aes(x = K, y = exclusivity)) +
+  geom_line() + geom_point() +
+  labs(title = "Exclusivity by K", y = "Exclusivity")
+
+p4 <- ggplot(results, aes(x = K, y = residuals)) +
+  geom_line() + geom_point() +
+  labs(title = "Residuals by K", y = "Residuals")
+
+# 合并所有图表
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+
+# 找出各指标最佳K值
+best_K <- list(
+  log_likelihood = results$K[which.max(results$log_likelihood)],
+  semantic_coherence = results$K[which.max(results$semantic_coherence)],
+  exclusivity = results$K[which.max(results$exclusivity)],
+  residuals = results$K[which.min(results$residuals)]
+)
+
+# 返回结果
+list(
+  metrics_table = results,
+  best_K_values = best_K,
+  plots = list(p1, p2, p3, p4)  # 也可直接显示不需要返回
+)
+
+
+
+```
+```{r}
+ results
+```
+```{r}
+best_K
+```
+#选择主题的另一种方法，SearchK
+```{r}
+storage <- searchK(out$documents, out$vocab, K = c(5, 10), prevalence = ~rating + s(day), data = meta)
+
+# 借助图表可视化的方式直观选择主题数
+pdf("stm-plot-ntopics.pdf") #存在PDF中
+plot(storage)
+dev.off()
+
+# 借助实际数据选择主题数
+t <- storage$out[[1]]
+t <- storage$out[[2]]
+
+```
+
+```{r}
+
+# 步骤2：假设固定 K=5 后选择最优模型，按照语义一致性选择
+poliblogSelect <- selectModel(out$documents, out$vocab, K = 5, prevalence = ~rating + s(day), max.em.its = 75, data = out$meta, runs = 20, seed = 8458159)
+
+```
+selectModel()首先建立一个运行模型的网络（net），并依次将所有模型运行（小于10次）E step和M step，抛弃低likelihood的模型，接着仅运行高likelihood的前20%的模型，直到收敛（convergence）或达到最大迭代次数（max.em.its）
+```{r}
+# 绘制图形平均得分每种模型采用不同的图例
+plotModels(poliblogSelect, pch=c(1,2,3,4), legend.position="bottomright") #选择模型3,这个1234可以先运行下面这行代码再确定最后保留了几个备选模型
+
+
+```
+
+```{r}
+poliblogSelect
+```
+
+```{r}
+# 选择模型3
+selectedmodel <- poliblogSelect$runout[[3]]
+```
+
+```{r}
+summary(selectedmodel)
+```
+
+
+
+当确定模型后，绘制主题标签（这边假设使用的是前面拟合好的poliblogPrevFit模型）
+方法1:# labelTopics()为选定的主题1到5通过列出顶部词语来标记主题
+```{r}
+labelTopicsSel <- labelTopics(poliblogPrevFit, c(1:5))
+sink("labelTopics-selected.txt", append=FALSE, split=TRUE)
+print(labelTopicsSel)
+sink() #关闭文件链接
+```
+方法2:sageLabels() 是stm包中另一种标签生成方法，基于语义相关性（而不仅是词频），可能包含更丰富的词汇组合
+```{r}
+# sageLabels() 比 labelTopics() 输出更详细
+sink("stm-list-sagelabel.txt", append=FALSE, split=TRUE)
+print(sageLabels(poliblogPrevFit))
+sink()
+```
+提取与主题最相关的文档最相关，列出与某个主题高度相关的文档：findthoughts()
+# 参数 'texts=shortdoc' 表示输出每篇文档前200个字符，n表示输出相关文档的篇数
+```{r}
+shortdoc <- substr(out$meta$documents, 1, 200)
+thoughts1 <- findThoughts(poliblogPrevFit, texts=shortdoc, n=2, topics=1)$docs[[1]]
+pdf("findThoughts-T1.pdf")
+plotQuote(thoughts1, width=40, main="Topic 1")
+dev.off()
+
+# how about more documents for more of these topics?
+thoughts6 <- findThoughts(poliblogPrevFit, texts=shortdoc, n=2, topics=6)$docs[[1]]
+thoughts18 <- findThoughts(poliblogPrevFit, texts=shortdoc, n=2, topics=18)$docs[[1]]
+pdf("stm-plot-find-thoughts.pdf")
+# mfrow=c(2, 1)将会把图输出到2行1列的表格中
+par(mfrow = c(2, 1), mar = c(.5, .5, 1, .5))
+plotQuote(thoughts6, width=40, main="Topic 6")
+plotQuote(thoughts18, width=40, main="Topic 18")
+dev.off()
+```
+主题模型分析中的协变量效应估计
+```{r}
+#数据预处理，转换分类变量
+out$meta$rating <- as.factor(out$meta$rating)
+prep <- estimateEffect(1:20 ~ rating + s(day), 
+                      poliblogPrevFit, 
+                      meta = out$meta, 
+                      uncertainty = "Global")
+#1:20：分析前20个主题与协变量的关系。
+#estimateEffect()用于估计协变量对主题比例的影响。
+summary(prep, topics=1)
+summary(prep, topics=2)
+summary(prep, topics=3)
+summary(prep, topics=4)
+```
+对于上述结果的解读：
+RatingLiberal如果不显著 就说明对该主题没有显著影响，如果显著就看影响的正负。后面的天数，比如：
+s(day)3       -0.032679   0.014269  -2.290   0.0220 * ，显著，说明第三天对应的这个主题数量会下降（系数为负），如果正就说明增加
+
+可视化
+Visualize: Presenting STM results
+1、主题占比
+```{r}
+# see PROPORTION OF EACH TOPIC in the entire CORPUS. Just insert your STM output
+pdf("top-topic.pdf")
+plot(poliblogPrevFit, type = "summary", xlim = c(0, .3))
+dev.off()
+```
+2、其他变量的影响
+covariate = "rating": 指定分析的协变量是rating（政治倾向）。
+cov.value1 = "Liberal": 第一组。
+cov.value2 = "Conservative": 第二组。
+结果解读：
+主题6、13、18自定义标签为"Obama/McCain"、“Sarah Palin”、“Bush Presidency”，主题6、主题13的意识形态偏中立，既不是保守，也不是自由，主题18的意识形态偏向于保守。
+
+```{r}
+pdf("stm-plot-topical-prevalence-contrast.pdf")
+plot(prep, covariate = "rating", topics = c(6, 13, 18),
+     model = poliblogPrevFit, method = "difference",
+     cov.value1 = "Liberal", cov.value2 = "Conservative",
+     xlab = "More Conservative ... More Liberal",
+     main = "Effect of Liberal vs. Conservative",
+     xlim = c(-.1, .1), labeltype = "custom",
+     custom.labels = c("Obama/McCain", "Sarah Palin", "Bush Presidency"))
+dev.off()
+
+```
+3、主题的时间变化趋势图
+```{r}
+pdf("stm-plot-topic-prevalence-with-time.pdf")
+plot(prep, "day", method = "continuous", topics = 13, 
+     model = z, printlegend = FALSE, xaxt = "n", xlab = "Time (2008)")
+monthseq <- seq(from = as.Date("2008-01-01"), to = as.Date("2008-12-01"), by = "month") 
+
+#topics = 13: 仅分析主题13
+#monthseq <- seq(from = as.Date("2008-01-01"), to = as.Date("2008-12-01"), by = "month")，生成2008年每月1日的日期序列（monthseq）。
+monthnames <- months(monthseq) #提取月份名称（monthnames）。
+# There were 50 or more warnings (use warnings() to see the first 50)
+axis(1, at = as.numeric(monthseq) - min(as.numeric(monthseq)), labels = monthnames)#计算日期相对于2008-01-01的天数差（as.numeric(monthseq) - min(...)），作为X轴刻度位置，需要确保确保day变量与monthseq的数值范围匹配（例如day=0对应2008-01-01）。
+dev.off()
+
+```
+3、主题内容的影响
+Topical Prevalence（主题比例）：
+研究协变量（如rating）如何影响主题的出现频率（例如自由派 vs. 保守派更常讨论某个主题）。
+
+Topical Content（主题内容）：
+研究协变量如何影响主题的词汇表达（例如自由派和保守派在讨论同一主题时使用的关键词不同）。
+
+首先，拟合包含内容协变量的STM模型，poliblogContent
+prevalence = ~rating + s(day),  # 主题比例的协变量（与之前相同）
+  content = ~rating,          # 主题内容的协变量（新增！）
+  
+```{r}
+# TOPICAL CONTENT.
+# STM can plot the influence of covariates included in as a topical content covariate.
+# A topical content variable allows for the vocabulary used to talk about a particular 
+# topic to vary. First, the STM must be fit with a variable specified in the content option.
+# Let's do something different. Instead of looking at how prevalent a topic is in a class of documents categorized by meta-data covariate... 
+# ... let's see how the words of the topic are emphasized differently in documents of each category of the covariate
+# First, we we estimate a new stm. It's the same as the old one, including prevalence option, but we add in a content option
+poliblogContent <- stm(out$documents, out$vocab, K = 20, 
+                       prevalence = ~rating + s(day), content = ~rating, 
+                       max.em.its = 75, data = out$meta, init.type = "Spectral")
+#绘制主题内容对比图
+pdf("stm-plot-content-perspectives.pdf")
+plot(poliblogContent, type = "perspectives", topics = 10) #展示同一主题（此处是主题10）在不同rating类别下的高频词差异。
+dev.off()
+
+```
+其他-补充：主题之间的相关度，还是沿用前面的poliblogPrevFit模型
+```{r}
+# 假设你的STM模型对象名为 poliblogPrevFit
+# 计算主题相关性矩阵
+topic_corr <- topicCorr(poliblogPrevFit)
+
+# 提取相关系数矩阵 (K x K, K为主题数)
+cor_matrix <- topic_corr$cor
+
+# 添加主题标签行名和列名（可选）
+rownames(cor_matrix) <- paste("Topic", 1:nrow(cor_matrix))
+colnames(cor_matrix) <- paste("Topic", 1:ncol(cor_matrix))
+
+# 保存为CSV文件
+write.csv(cor_matrix, file = "topic_correlation_matrix.csv", row.names = TRUE)
+
+# 打印保存路径
+cat("主题相关性矩阵已保存到:", normalizePath("topic_correlation_matrix.csv"), "\n")
+```
+将主题添加到原始数据中
+```{r}
+theta <- poliblogPrevFit$theta  # 维度：文档数 × 主题数
+dominant_topic <- apply(theta, 1, which.max)  # 返回每个文档的主要主题编号
+out$meta$dominant_topic <- dominant_topic
+# 可选：保存更新后的元数据
+write.csv(out$meta, "metadata_with_topics.csv", row.names = FALSE)
+
+```
+拼接所有主题的概率回到原文档中
+```{r}
+# 获取文档-主题概率矩阵 (theta)
+theta <- poliblogPrevFit$theta  # 维度: [文档数 × 主题数]
+# 转换为数据框，并添加文档ID（假设元数据中有doc_id列）
+theta_df <- as.data.frame(theta)
+colnames(theta_df) <- paste0("Topic_", 1:ncol(theta))  # 列名改为Topic_1, Topic_2...
+# 添加文档标识列（如ID或文本）
+theta_df$doc_id <- out$meta$documents  # 替换为您的实际文档ID列名
+write.csv(theta_df, "document_topic_probabilities.csv", row.names = FALSE)
+
+```
+
